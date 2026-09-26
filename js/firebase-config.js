@@ -3,10 +3,10 @@
 //  (Console Firebase > Paramètres du projet > Vos applications > Web)
 // ============================================================
 export const firebaseConfig = {
-  apiKey: "A_REMPLACER",
-  authDomain: "A_REMPLACER.firebaseapp.com",
-  projectId: "A_REMPLACER",
-  storageBucket: "A_REMPLACER.appspot.com",
-  messagingSenderId: "A_REMPLACER",
-  appId: "A_REMPLACER",
+  apiKey: "AIzaSyCmGhjDRKgYlOw3orHqHxrzg2RDWd0kAvc",
+  authDomain: "tournoi-poules-eps.firebaseapp.com",
+  projectId: "tournoi-poules-eps",
+  storageBucket: "tournoi-poules-eps.firebasestorage.app",
+  messagingSenderId: "65328179360",
+  appId: "1:65328179360:web:61800fcf1359778fb041c5"
 };
