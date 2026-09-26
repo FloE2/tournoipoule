@@ -1,4 +1,6 @@
-# Tournois EPS
+# Tournoi poule
+
+**Collège Yves du Manoir de Vaucresson** · © 2026 Eude Florian
 
 Application web pour organiser des tournois par poules en cours d'EPS : import des classes, niveaux en étoiles, poules homogènes ou équilibrées, mixtes ou non, rencontres « tout le monde se rencontre », rôles (arbitre, coach, observateur…), classement en direct avec bonus/malus fair-play, saisie sur tablettes, historique et montées/descentes d'une séance à l'autre.
 
@@ -9,7 +11,7 @@ Hébergement gratuit : **GitHub Pages** pour le site, **Firebase** (offre Spark,
 ## 1. Créer le projet Firebase (10 minutes)
 
 1. Va sur <https://console.firebase.google.com> et connecte-toi avec ton compte Google.
-2. **Ajouter un projet** → donne un nom (ex. `tournois-eps`) → tu peux désactiver Google Analytics → Créer.
+2. **Ajouter un projet** → donne un nom (ex. `tournoi-poule`) → tu peux désactiver Google Analytics → Créer.
 3. **Authentification** (menu Créer > Authentication) → Commencer → onglet *Sign-in method* :
    - active **Google** (choisis ton adresse comme e-mail d'assistance) ;
    - active **Anonyme** (c'est ce qu'utilisent les tablettes des élèves).
@@ -20,10 +22,10 @@ Hébergement gratuit : **GitHub Pages** pour le site, **Firebase** (offre Spark,
 
 ## 2. Mettre le site en ligne avec GitHub Pages
 
-1. Crée un compte sur <https://github.com> si besoin, puis **New repository** (ex. `tournois-eps`), en **Public**.
+1. Crée un compte sur <https://github.com> si besoin, puis **New repository** (ex. `tournoi-poule`), en **Public**.
 2. **Add file > Upload files** : dépose tout le contenu du dossier (`index.html`, dossiers `css` et `js`, etc.) → *Commit changes*.
 3. Dans le dépôt : **Settings > Pages** → *Source* : `Deploy from a branch` → branche `main`, dossier `/ (root)` → Save.
-4. Après une minute, l'adresse s'affiche : `https://TON-PSEUDO.github.io/tournois-eps/`.
+4. Après une minute, l'adresse s'affiche : `https://TON-PSEUDO.github.io/tournoi-poule/`.
 5. **Important** : retourne dans Firebase > Authentication > **Paramètres** > *Domaines autorisés* → **Ajouter un domaine** → `TON-PSEUDO.github.io`.
 
 C'est prêt. Chaque collègue ouvre la même adresse et se connecte avec **son propre compte Google** : il ne voit que ses classes et son historique.
