@@ -34,7 +34,7 @@ if (configured) {
   db = initializeFirestore(fb, { experimentalForceLongPolling: true });
 }
 
-const APP_NAME = 'Tournoi poule';
+const APP_NAME = 'Tournoi';
 const SCHOOL = 'Collège Yves du Manoir de Vaucresson';
 const footer = () => `<footer class="credits">© ${new Date().getFullYear()} Eude Florian · ${SCHOOL}</footer>`;
 
@@ -159,12 +159,19 @@ function render() {
 }
 
 function shell(content) {
-  const tabs = [['seance', 'Séances'], ['defis', 'Défi solidaire'], ['classes', 'Classes'], ['historique', 'Historique'], ['suivi', 'Suivi des élèves'], ['reglages', 'Réglages']];
-  const cur = { wizard: 'seance', live: 'seance', classe: 'classes', 'histo-detail': 'historique', 'defi-live': 'defis', 'defi-histo': 'defis' }[S.view] || S.view;
+  // Onglets principaux, et sous-onglets de l'espace « Poule »
+  const sub = { wizard: 'seance', live: 'seance', 'histo-detail': 'historique' }[S.view] || S.view;
+  const POULE = [['seance', 'Séances'], ['historique', 'Historique'], ['suivi', 'Suivi des élèves'], ['reglages', 'Réglages']];
+  const inPoule = POULE.some(([v]) => v === sub);
+  const top = inPoule ? 'poule' : { classe: 'classes', 'defi-live': 'defis', 'defi-histo': 'defis' }[S.view] || S.view;
+  const tabs = [['poule', 'Poule', 'seance'], ['defis', 'Défi solidaire', 'defis']];
+  const subnav = inPoule ? `<nav class="subnav">${POULE.map(([v, l]) => `<button class="${sub === v ? 'on' : ''}" data-a="nav" data-v="${v}">${l}</button>`).join('')}</nav>` : '';
   return `<header class="topbar"><div class="brand">${APP_NAME}<small>${SCHOOL}</small></div>
-    <nav class="nav">${tabs.map(([v, l]) => `<button class="${cur === v ? 'on' : ''}" data-a="nav" data-v="${v}">${l}</button>`).join('')}</nav>
+    <nav class="nav">${tabs.map(([k, l, v]) => `<button class="${top === k ? 'on' : ''}" data-a="nav" data-v="${v}">${l}</button>`).join('')}
+      <a class="nav-link" href="${esc(atpConfig.appUrl)}" target="_blank" rel="noopener">Tournoi ATP <span aria-hidden="true">↗</span></a>
+      <button class="${top === 'classes' ? 'on' : ''}" data-a="nav" data-v="classes">Classes</button></nav>
     <div class="who"><span>${esc(S.user?.displayName || '')}</span><button class="btn small ghost" style="color:inherit" data-a="logout">Se déconnecter</button></div>
-  </header><main class="main">${content}</main>${footer()}`;
+  </header>${subnav}<main class="main">${content}</main>${footer()}`;
 }
 
 function vNoConfig() {
@@ -190,7 +197,7 @@ function vSeance() {
         <button class="btn primary" data-a="openLive" data-code="${s.code}">Reprendre</button></div>`).join('')
     : `<div class="empty">Aucune séance en cours.</div>`;
   return shell(`
-    <div class="section-title"><h1>Séances</h1><button class="btn primary big" data-a="newSession" ${S.classes.length ? '' : 'disabled'}>Nouvelle séance</button></div>
+    <div class="section-title"><h1>Séances de tournoi par poules</h1><button class="btn primary big" data-a="newSession" ${S.classes.length ? '' : 'disabled'}>Nouvelle séance</button></div>
     ${S.classes.length ? '' : `<div class="panel"><p>Commence par importer une classe dans l'onglet <b>Classes</b>.</p><button class="btn primary" data-a="nav" data-v="classes">Importer une classe</button></div>`}
     <h2>En cours</h2>${act}`);
 }
