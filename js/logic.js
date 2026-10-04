@@ -301,3 +301,60 @@ export function computeMoves(session) {
   }
   return res;
 }
+
+// ---------- Classement ATP (appli externe, lecture seule) ----------
+export function parseAtpStudents(raw) {
+  const list = (Array.isArray(raw) ? raw : Object.values(raw || {}))
+    .filter((s) => s && String(s.name || '').trim())
+    .map((s) => ({ name: String(s.name).trim(), points: Number(s.points) || 0, wins: Number(s.wins) || 0, absent: !!s.absent, dispense: !!s.dispense }));
+  list.sort((a, b) => b.points - a.points || b.wins - a.wins || a.name.localeCompare(b.name, 'fr'));
+  list.forEach((s, i) => (s.rank = i + 1));
+  return list;
+}
+function atpNameMatches(key, s) {
+  const p = norm(s.prenom), n = norm(s.nom);
+  if (!p && !n) return false;
+  if (key === p || key === `${p} ${n}` || key === `${n} ${p}`) return true;
+  if (p && n && key.startsWith(p + ' ')) return key.slice(p.length + 1).replace('.', '')[0] === n[0];
+  return false;
+}
+// Relie chaque nom ATP à un élève de la classe (correspondances enregistrées d'abord)
+export function matchAtp(atpList, students, savedMap = {}) {
+  const used = new Set();
+  const ids = new Set(students.map((s) => s.id));
+  for (const a of atpList) {
+    const sid = savedMap[a.name];
+    a.sid = sid && ids.has(sid) && !used.has(sid) ? sid : '';
+    if (a.sid) used.add(a.sid);
+  }
+  for (const a of atpList) {
+    if (a.sid) continue;
+    const cands = students.filter((s) => !used.has(s.id) && atpNameMatches(norm(a.name), s));
+    if (cands.length === 1) { a.sid = cands[0].id; used.add(a.sid); }
+    a.ambiguous = !a.sid && cands.length > 1;
+  }
+  return atpList;
+}
+
+// ---------- Défi solidaire ----------
+// Compte les défis validés par élève, l'écart, les élèves bloqués (tuteurs) et ceux à aider
+export function defiState(session, nameOf = (p) => p) {
+  const present = session.present || [];
+  const done = Object.fromEntries(present.map((p) => [p, new Set()]));
+  for (const v of Object.values(session.validations || {})) if (done[v.pid]) done[v.pid].add(v.defiId);
+  const n = Object.fromEntries(present.map((p) => [p, done[p].size]));
+  const vals = Object.values(n);
+  const min = vals.length ? Math.min(...vals) : 0;
+  const max = vals.length ? Math.max(...vals) : 0;
+  const total = vals.reduce((a, b) => a + b, 0);
+  const E = Math.max(1, Number(session.settings?.ecartMax) || 3);
+  const byName = (a, b) => String(nameOf(a)).localeCompare(String(nameOf(b)), 'fr');
+  const blocked = present.filter((p) => n[p] - min >= E).sort((a, b) => n[b] - n[a] || byName(a, b));
+  const fragiles = present.filter((p) => n[p] === min).sort(byName);
+  const tutors = {}, helpers = {};
+  if (fragiles.length) blocked.forEach((p, i) => {
+    const f = fragiles[i % fragiles.length];
+    tutors[p] = f; (helpers[f] = helpers[f] || []).push(p);
+  });
+  return { n, done, min, max, total, ecart: max - min, E, blocked: new Set(blocked), fragiles, tutors, helpers };
+}

@@ -1,6 +1,5 @@
 // ============================================================
-//  Colle ici la configuration de TON projet Firebase
-//  (Console Firebase > Paramètres du projet > Vos applications > Web)
+//  Configuration du projet Firebase « Tournoi-poules-Eps »
 // ============================================================
 export const firebaseConfig = {
   apiKey: "AIzaSyCmGhjDRKgYlOw3orHqHxrzg2RDWd0kAvc",
@@ -8,5 +7,5 @@ export const firebaseConfig = {
   projectId: "tournoi-poules-eps",
   storageBucket: "tournoi-poules-eps.firebasestorage.app",
   messagingSenderId: "65328179360",
-  appId: "1:65328179360:web:61800fcf1359778fb041c5"
+  appId: "1:65328179360:web:61800fcf1359778fb041c5",
 };

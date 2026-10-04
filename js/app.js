@@ -1,19 +1,22 @@
 // ============================================================
-//  Tournois EPS — application principale
+//  Tournoi poule — Collège Yves du Manoir de Vaucresson
+//  © Eude Florian
 // ============================================================
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signInAnonymously, onAuthStateChanged, signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
-  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, getDocs, query, where, onSnapshot,
+  initializeFirestore,
+  doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, getDocs, query, where, onSnapshot, deleteField,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 import {
   uid, DEFAULT_SETTINGS, parseStudentRows, fullName, shortName, buildEntries, makePools,
-  buildPoolMatches, computeStandings, computeMoves, fpPoints,
+  buildPoolMatches, computeStandings, computeMoves, fpPoints, parseAtpStudents, matchAtp, defiState,
 } from './logic.js';
+import { DEFAULT_DEFIS, SCHEMAS, courtSvg } from './defis-data.js';
+import { atpConfig } from './atp-config.js';
 
 // ---------- Initialisation ----------
 const $app = document.getElementById('app');
@@ -25,16 +28,23 @@ let auth, db;
 if (configured) {
   const fb = initializeApp(firebaseConfig);
   auth = getAuth(fb);
-  db = initializeFirestore(fb, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+  // Connexion compatible avec les filtres des réseaux scolaires (proxy) :
+  // le « long polling » remplace la connexion continue souvent bloquée.
+  // Pas de stockage local : un résultat n'est affiché comme enregistré que s'il est bien arrivé sur le serveur.
+  db = initializeFirestore(fb, { experimentalForceLongPolling: true });
 }
+
+const APP_NAME = 'Tournoi poule';
+const SCHOOL = 'Collège Yves du Manoir de Vaucresson';
+const footer = () => `<footer class="credits">© ${new Date().getFullYear()} Eude Florian · ${SCHOOL}</footer>`;
 
 const POOL_COLORS = ['#1D5FA8', '#E0A100', '#23855A', '#C23E36', '#6B4FA0', '#0F8A8A', '#D2691E', '#4E5D6C'];
 const poolColor = (i) => POOL_COLORS[i % POOL_COLORS.length];
 const FORMAT_LABEL = { simple: 'Simple (1 contre 1)', double: 'Double (2 contre 2)', equipe: 'Équipes' };
 
 const S = {
-  user: null, teacher: null, classes: [], active: [], history: null,
-  view: 'loading', p: {}, session: null, code: null, unsub: null, wiz: null, poolTab: 'all',
+  user: null, teacher: null, classes: [], active: [], activeDefi: [], history: null, defiHistory: null,
+  view: 'loading', p: {}, session: null, code: null, coll: 'sessions', unsub: null, wiz: null, poolTab: 'all', dw: null, atpClasses: null,
 };
 
 // ---------- Utilitaires ----------
@@ -46,7 +56,8 @@ function toast(msg, err = false) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => ($toast.hidden = true), err ? 5000 : 2500);
 }
 function fail(e) { console.error(e); toast('Erreur : ' + (e.message || e), true); }
-function go(view, p = {}) { S.view = view; S.p = p; if (view !== 'live' && view !== 'tablet-pool') stopLive(); render(); window.scrollTo(0, 0); }
+const LIVE_VIEWS = ['live', 'tablet-pool', 'defi-live', 'tablet-defi'];
+function go(view, p = {}) { S.view = view; S.p = p; if (!LIVE_VIEWS.includes(view)) stopLive(); render(); window.scrollTo(0, 0); }
 const starsHtml = (v, attrs = '') =>
   `<span class="stars">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="${n <= v ? 'on' : ''}" data-v="${n}" ${attrs} aria-label="Niveau ${n}">★</button>`).join('')}</span>`;
 const starsRo = (v) => `<span class="stars ro" title="Niveau ${v.toFixed(1)}">${'★'.repeat(Math.round(v))}</span>`;
@@ -55,7 +66,7 @@ const sexeBadge = (s) => `<span class="sexe ${s || 'X'}">${s || '?'}</span>`;
 // ---------- Modales ----------
 function openModal(html, cls = '') { $modal.innerHTML = `<div class="modal ${cls}" role="dialog" aria-modal="true">${html}</div>`; $modal.hidden = false; }
 function closeModal() {
-  const wasScore = S.modal?.type === 'score';
+  const wasScore = S.modal?.type === 'score' || S.modal?.type === 'defi';
   $modal.hidden = true; $modal.innerHTML = ''; S.modal = null;
   if (wasScore) render(); // affiche les mises à jour reçues pendant la saisie
 }
@@ -94,6 +105,10 @@ async function loadTeacher() {
     t.sports = t.sports || [];
     S.teacher = t;
   }
+  if (!S.teacher.defis) {
+    S.teacher.defis = DEFAULT_DEFIS.map((d) => ({ id: uid(), ...d }));
+    await updateDoc(tRef(), { defis: S.teacher.defis });
+  }
 }
 async function saveTeacher(fields) { Object.assign(S.teacher, fields); await updateDoc(tRef(), fields); }
 async function loadClasses() {
@@ -104,6 +119,23 @@ async function saveClass(c) { const { id, ...data } = c; await setDoc(classRef(i
 async function loadActive() {
   const q = await getDocs(query(collection(db, 'sessions'), where('ownerUid', '==', S.user.uid), where('active', '==', true)));
   S.active = q.docs.map((d) => d.data()).sort((a, b) => b.createdAt - a.createdAt);
+  const q2 = await getDocs(query(collection(db, 'defiSessions'), where('ownerUid', '==', S.user.uid), where('active', '==', true)));
+  S.activeDefi = q2.docs.map((d) => d.data()).sort((a, b) => b.createdAt - a.createdAt);
+}
+const defiHistCol = () => collection(db, 'teachers', S.user.uid, 'defiHistory');
+async function loadDefiHistory(force = false) {
+  if (S.defiHistory && !force) return;
+  const q = await getDocs(defiHistCol());
+  S.defiHistory = q.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => b.date - a.date);
+}
+// Code à 4 chiffres libre (tournois et défis partagent les mêmes codes)
+async function freeCode() {
+  for (let k = 0; k < 30; k++) {
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    const [a, b] = await Promise.all([getDoc(doc(db, 'sessions', code)), getDoc(doc(db, 'defiSessions', code))]);
+    if (!a.exists() && !b.exists()) return code;
+  }
+  throw new Error('Impossible de trouver un code libre, réessaie.');
 }
 async function loadHistory(force = false) {
   if (S.history && !force) return;
@@ -120,18 +152,19 @@ function render() {
     login: vLogin, seance: vSeance, wizard: vWizard, classes: vClasses, classe: vClasse,
     historique: vHistorique, 'histo-detail': vHistoDetail, suivi: vSuivi, reglages: vReglages,
     live: vLive, 'tablet-join': vTabletJoin, 'tablet-pool': vTabletPool,
+    defis: vDefis, 'defi-live': vDefiLive, 'tablet-defi': vTabletDefi, 'defi-histo': vDefiHisto,
   };
   $app.innerHTML = (views[S.view] || views.loading)();
   updateTimers();
 }
 
 function shell(content) {
-  const tabs = [['seance', 'Séances'], ['classes', 'Classes'], ['historique', 'Historique'], ['suivi', 'Suivi des élèves'], ['reglages', 'Réglages']];
-  const cur = { wizard: 'seance', live: 'seance', classe: 'classes', 'histo-detail': 'historique' }[S.view] || S.view;
-  return `<header class="topbar"><div class="brand">Tournois EPS</div>
+  const tabs = [['seance', 'Séances'], ['defis', 'Défi solidaire'], ['classes', 'Classes'], ['historique', 'Historique'], ['suivi', 'Suivi des élèves'], ['reglages', 'Réglages']];
+  const cur = { wizard: 'seance', live: 'seance', classe: 'classes', 'histo-detail': 'historique', 'defi-live': 'defis', 'defi-histo': 'defis' }[S.view] || S.view;
+  return `<header class="topbar"><div class="brand">${APP_NAME}<small>${SCHOOL}</small></div>
     <nav class="nav">${tabs.map(([v, l]) => `<button class="${cur === v ? 'on' : ''}" data-a="nav" data-v="${v}">${l}</button>`).join('')}</nav>
     <div class="who"><span>${esc(S.user?.displayName || '')}</span><button class="btn small ghost" style="color:inherit" data-a="logout">Se déconnecter</button></div>
-  </header><main class="main">${content}</main>`;
+  </header><main class="main">${content}</main>${footer()}`;
 }
 
 function vNoConfig() {
@@ -141,12 +174,12 @@ function vNoConfig() {
 
 function vLogin() {
   return `<div class="hero"><div class="hero-card">
-    <div class="hero-court"><h1>Tournois EPS</h1><p>Poules, rencontres et classement en direct</p></div>
+    <div class="hero-court"><h1>${APP_NAME}</h1><p>${SCHOOL}</p></div>
     <div class="hero-body">
       <button class="btn primary big" data-a="loginGoogle">Espace enseignant (compte Google)</button>
       <button class="btn big" data-a="loginTablet">Mode tablette élève</button>
       <p class="small muted">Chaque collègue se connecte avec son propre compte Google et retrouve ses classes. Les tablettes n'ont besoin que du code affiché au lancement de la séance.</p>
-    </div></div></div>`;
+    </div></div>${footer()}</div>`;
 }
 
 // ---------- Vue : séances ----------
@@ -286,11 +319,13 @@ function vWizard() {
   <div class="row" style="margin-top:1rem">
     <div><div class="small" style="font-weight:600;margin-bottom:.3rem">Répartir selon</div><div class="seg">
       <button class="${w.base === 'niveaux' ? 'on' : ''}" data-a="setWiz" data-k="base" data-v="niveaux">Les étoiles</button>
-      <button class="${w.base === 'historique' ? 'on' : ''}" data-a="setWiz" data-k="base" data-v="historique" ${last ? '' : 'disabled'}>Montées/descentes de la dernière séance</button></div>
+      <button class="${w.base === 'historique' ? 'on' : ''}" data-a="setWiz" data-k="base" data-v="historique" ${last ? '' : 'disabled'}>Montées/descentes de la dernière séance</button>
+      <button class="${w.base === 'atp' ? 'on' : ''}" data-a="setWiz" data-k="base" data-v="atp">Classement ATP</button></div>
       ${last ? `<div class="small muted" style="margin-top:.3rem">Dernière séance : ${fmtDate(last.date)} (${esc(last.sport)})</div>` : ''}</div>
     <label class="f" style="flex:1;min-width:260px">Rôles des joueurs au repos (séparés par des virgules)<input value="${esc(w.roles)}" data-bind="roles"></label>
   </div>
-  <div class="row" style="margin-top:1.2rem"><button class="btn primary big" data-a="genPools" ${present.length < 2 || !sport ? 'disabled' : ''}>${w.preview ? 'Regénérer les poules' : 'Générer les poules'}</button></div>
+  ${w.base === 'atp' ? atpPanel(c) : ''}
+  <div class="row" style="margin-top:1.2rem"><button class="btn primary big" data-a="genPools" ${present.length < 2 || !sport || (w.base === 'atp' && !w.atp) ? 'disabled' : ''}>${w.preview ? 'Regénérer les poules' : 'Générer les poules'}</button></div>
   </div>`;
 
   if (w.preview) html += vPreview();
@@ -313,7 +348,7 @@ function vPreview() {
       ${p.entryIds.map((eid) => {
         const e = entries[eid];
         return `<div class="entry"><div class="who-names">${e.name && S.wiz.format !== 'simple' ? `<b>${esc(e.name)}</b><br><span class="small">${esc(entryLabel(e, people))}</span>` : esc(entryLabel(e, people))}</div>
-          ${starsRo(lvl(e))}
+          ${S.wiz.base === 'atp' && S.wiz.atp ? e.members.map((pid) => { const a = S.wiz.atp.list.find((x) => x.sid === pid); return a ? `<span class="tag" title="Rang ATP">#${a.rank}</span>` : ''; }).join('') : starsRo(lvl(e))}
           <select data-a-change="moveEntry" data-eid="${eid}" aria-label="Déplacer">${pools.map((q, j) => `<option value="${j}" ${j === i ? 'selected' : ''}>${j === i ? 'Déplacer…' : esc(q.name)}</option>`).join('')}</select></div>`;
       }).join('')}
       ${p.officials.length ? `<div class="small" style="margin-top:.5rem"><span class="tag">Dispensés</span> ${p.officials.map((pid) => esc(shortName(people[pid]))).join(', ')}</div>` : ''}
@@ -327,9 +362,11 @@ function generatePreview() {
   const { c, present, ts } = wizCounts();
   const nP = Math.max(1, +w.nPools || 1);
   const last = w.base === 'historique' ? lastHistoryFor(w.classId) : null;
+  const atpRank = w.base === 'atp' && w.atp ? Object.fromEntries(w.atp.list.filter((a) => a.sid).map((a) => [a.sid, a.rank])) : null;
   const players = present.map((s) => {
     let rankKey;
     const h = last?.moves?.[s.id];
+    if (atpRank) return { ...s, rankKey: (atpRank[s.id] ?? 1000 - s.niveau) + Math.random() * 0.01 };
     if (h) rankKey = (h.pos + h.move) * 100 - s.niveau;
     else if (last) rankKey = ((5 - s.niveau) / 4) * (nP - 1) * 100 - s.niveau;
     else rankKey = -s.niveau;
@@ -355,23 +392,48 @@ function generatePreview() {
 
 // ---------- Séance en direct ----------
 function stopLive() { if (S.unsub) { S.unsub(); S.unsub = null; } S.session = null; }
-function listenSession(code, viewName, extra = {}) {
+function listenSession(code, viewName, extra = {}, coll = 'sessions') {
   stopLive();
-  S.code = code;
+  S.code = code; S.coll = coll;
   S.view = viewName; S.p = extra;
   render();
-  S.unsub = onSnapshot(doc(db, 'sessions', code), (snap) => {
+  subscribe();
+}
+// Abonnement temps réel à la séance (relançable après une mise en veille)
+function subscribe() {
+  if (S.unsub) S.unsub();
+  const code = S.code, viewName = S.view;
+  setSync('wait');
+  S.unsub = onSnapshot(doc(db, S.coll, code), { includeMetadataChanges: true }, (snap) => {
+    S.lastSync = Date.now();
+    setSync(snap.metadata.fromCache ? 'wait' : snap.metadata.hasPendingWrites ? 'send' : 'ok');
     if (!snap.exists() || !snap.data().active) {
-      if (viewName === 'tablet-pool') { localStorage.removeItem('tournoiCode'); toast('La séance est terminée.'); go('tablet-join'); }
+      if (snap.metadata.fromCache) return; // pas encore la réponse du serveur
+      if (viewName === 'tablet-pool' || viewName === 'tablet-defi') { localStorage.removeItem('tournoiCode'); toast('La séance est terminée.'); go('tablet-join'); }
       else if (S.view === 'live') { go('seance'); }
+      else if (S.view === 'defi-live') { go('defis'); }
       return;
     }
-    S.session = snap.data();
-    if (!$modal.hidden && S.modal?.type === 'score') return; // ne pas perturber une saisie en cours
+    const data = snap.data();
+    const changed = JSON.stringify(data) !== JSON.stringify(S.session);
+    S.session = data;
+    if (!changed) return; // simple changement d'état de connexion
+    if (!$modal.hidden && (S.modal?.type === 'score' || S.modal?.type === 'defi')) return; // ne pas perturber une saisie en cours
     render();
-  }, fail);
+  }, (e) => { setSync('err'); fail(e); });
 }
-const sesRef = () => doc(db, 'sessions', S.code);
+// Voyant de connexion
+const SYNC_LABEL = { ok: 'En direct', wait: 'Connexion…', send: 'Envoi…', err: 'Hors ligne', off: 'Pas de wifi' };
+function setSync(state) {
+  S.sync = navigator.onLine === false ? 'off' : state;
+  document.querySelectorAll('[data-sync]').forEach((el) => { el.className = 'sync ' + S.sync; el.querySelector('span').textContent = SYNC_LABEL[S.sync]; });
+}
+const syncBadge = () => `<button class="sync ${S.sync || 'wait'}" data-sync data-a="resync" title="Toucher pour relancer la connexion"><i></i><span>${SYNC_LABEL[S.sync || 'wait']}</span></button>`;
+// Après une mise en veille de l'iPad ou une coupure wifi : on se reconnecte
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.code && S.unsub) subscribe(); });
+window.addEventListener('online', () => { if (S.code && S.unsub) subscribe(); });
+window.addEventListener('offline', () => setSync('off'));
+const sesRef = () => doc(db, S.coll, S.code);
 const personName = (pid) => shortName(S.session.people[pid]);
 function entryName(eid) {
   const e = S.session.entries[eid];
@@ -394,6 +456,7 @@ function vLive() {
       <div><h1 style="margin:0">${esc(s.sport)} · ${esc(s.className)}</h1>
         <div class="muted">${FORMAT_LABEL[s.format.type]}${s.format.type === 'equipe' ? ' de ' + s.format.teamSize : ''} · ${done}/${all.length} matchs joués</div></div>
       <div class="code-box"><span class="small">Code tablette</span><b>${s.code}</b></div>
+      ${syncBadge()}
       ${timerHtml(true)}
       <div class="row"><button class="btn go" data-a="endSession">Terminer et archiver</button>
       <button class="btn danger small" data-a="abortSession">Supprimer</button></div>
@@ -508,7 +571,10 @@ function renderScoreModal() {
   S.modal = { ...S.modal, type: 'score' };
 }
 async function saveMatch(m) {
-  await updateDoc(sesRef(), { [`matches.${m.id}`]: m, updatedAt: Date.now() });
+  setSync('send');
+  const slow = setTimeout(() => toast("Résultat pas encore reçu par l'ordinateur : vérifie le wifi. Ne ferme pas la page, il sera envoyé dès le retour de la connexion.", true), 6000);
+  try { await updateDoc(sesRef(), { [`matches.${m.id}`]: m, updatedAt: Date.now() }); setSync('ok'); }
+  finally { clearTimeout(slow); }
 }
 
 function openRoles(mid) {
@@ -564,7 +630,10 @@ function updateTimers() {
   if (!els.length || !S.session) return;
   const { t, left, running } = timerState();
   els.forEach((el) => { el.textContent = fmtClock(left); el.classList.toggle('over', running && left <= 0); el.classList.toggle('run', running && left > 0); });
-  if (running && left <= 0 && beepedFor !== t.endAt) { beepedFor = t.endAt; beep(); }
+  if (running && left <= 0 && beepedFor !== t.endAt) {
+    beepedFor = t.endAt; beep();
+    if (S.view === 'tablet-defi' || S.view === 'defi-live') render(); // bloque les validations à la fin du temps
+  }
 }
 setInterval(updateTimers, 500);
 
@@ -573,20 +642,20 @@ function vTabletJoin() {
   return `<div class="hero"><div class="hero-card"><div class="hero-court"><h1>Tablette</h1><p>Entre le code affiché sur l'ordinateur du professeur</p></div>
     <div class="hero-body"><input class="code-input" id="codeIn" inputmode="numeric" maxlength="4" placeholder="····" autocomplete="off">
     <button class="btn primary big" data-a="joinCode">Rejoindre la séance</button>
-    <button class="btn ghost small" data-a="logout">Quitter le mode tablette</button></div></div></div>`;
+    <button class="btn ghost small" data-a="logout">Quitter le mode tablette</button></div></div>${footer()}</div>`;
 }
 function vTabletPool() {
   const s = S.session;
   if (!s) return '<div class="loading">Connexion à la séance…</div>';
   const poolId = S.p.pool;
   const header = `<header class="topbar"><div class="brand">${esc(s.sport)}</div><div class="nav"></div>
-    ${timerHtml(false)}<button class="btn small ghost" style="color:inherit" data-a="tabletChangePool">Changer de poule</button></header>`;
+    ${syncBadge()}${timerHtml(false)}<button class="btn small ghost" style="color:inherit" data-a="tabletChangePool">Changer de poule</button></header>`;
   if (!poolId || !s.pools.find((p) => p.id === poolId)) {
     return `${header}<main class="main"><h1>Choisis ta poule</h1><div class="pool-pick">${s.pools.map((p, i) =>
       `<button data-a="tabletPool" data-pid="${p.id}" style="--pc:${poolColor(i)}">${esc(p.name)}</button>`).join('')}</div>
-      <p style="margin-top:2rem"><button class="btn ghost small" data-a="tabletLeave">Quitter cette séance</button></p></main>`;
+      <p style="margin-top:2rem"><button class="btn ghost small" data-a="tabletLeave">Quitter cette séance</button></p></main>${footer()}`;
   }
-  return `${header}<main class="main">${vPool(poolId, false)}</main>`;
+  return `${header}<main class="main">${vPool(poolId, false)}</main>${footer()}`;
 }
 
 // ---------- Historique ----------
@@ -641,7 +710,10 @@ function vHistoDetail() {
 // ---------- Suivi des élèves ----------
 function studentStats(classId) {
   const c = getClass(classId);
-  const stats = Object.fromEntries(c.students.map((s) => [s.id, { s, seances: 0, j: 0, v: 0, n: 0, d: 0, bonus: 0, malus: 0, roles: {}, ups: 0, downs: 0, last: '' }]));
+  const stats = Object.fromEntries(c.students.map((s) => [s.id, { s, seances: 0, j: 0, v: 0, n: 0, d: 0, bonus: 0, malus: 0, roles: {}, ups: 0, downs: 0, last: '', defis: 0, defiSeances: 0 }]));
+  for (const h of (S.defiHistory || []).filter((x) => x.classId === classId)) {
+    for (const [pid, k] of Object.entries(h.counts || {})) if (stats[pid]) { stats[pid].defis += k; stats[pid].defiSeances++; }
+  }
   const hist = (S.history || []).filter((h) => h.classId === classId).slice().reverse();
   for (const h of hist) {
     const s = h.session;
@@ -675,7 +747,7 @@ function studentStats(classId) {
   return { c, rows: Object.values(stats), n: hist.length };
 }
 function vSuivi() {
-  if (!S.history) { loadHistory().then(render).catch(fail); return shell('<div class="loading">Chargement…</div>'); }
+  if (!S.history || !S.defiHistory) { Promise.all([loadHistory(), loadDefiHistory()]).then(render).catch(fail); return shell('<div class="loading">Chargement…</div>'); }
   if (!S.classes.length) return shell('<h1>Suivi des élèves</h1><div class="empty">Aucune classe.</div>');
   const cid = S.p.classId || S.classes[0].id;
   const { rows, n } = studentStats(cid);
@@ -685,10 +757,10 @@ function vSuivi() {
     <button class="btn" data-a="exportSuivi" data-id="${cid}">Exporter en Excel</button></div></div>
     <p class="muted">Bilan sur ${n} séance${n > 1 ? 's' : ''} archivée${n > 1 ? 's' : ''}. Utile pour l'évaluation du cycle : régularité, fair-play et rôles tenus.</p>
     <div class="panel"><div class="table-wrap"><table><thead><tr><th>Élève</th><th class="num">Séances</th><th class="num">Matchs</th><th class="num">V</th><th class="num">N</th><th class="num">D</th>
-      <th class="num">🌟</th><th class="num">😠</th><th>Rôles tenus</th><th class="num">▲</th><th class="num">▼</th><th>Dernière poule</th></tr></thead><tbody>
+      <th class="num">🌟</th><th class="num">😠</th><th>Rôles tenus</th><th class="num">▲</th><th class="num">▼</th><th>Dernière poule</th><th class="num" title="Défis solidaires validés (nombre de séances)">Défis</th></tr></thead><tbody>
     ${rows.map((x) => `<tr><td>${esc(fullName(x.s))}</td><td class="num">${x.seances}</td><td class="num">${x.j}</td><td class="num">${x.v}</td><td class="num">${x.n}</td><td class="num">${x.d}</td>
       <td class="num fp-pos">${x.bonus || ''}</td><td class="num fp-neg">${x.malus || ''}</td>
-      <td class="small">${Object.entries(x.roles).map(([r, k]) => `${esc(r)} ×${k}`).join(', ')}</td><td class="num mv up">${x.ups || ''}</td><td class="num mv down">${x.downs || ''}</td><td class="small">${esc(x.last)}</td></tr>`).join('')}
+      <td class="small">${Object.entries(x.roles).map(([r, k]) => `${esc(r)} ×${k}`).join(', ')}</td><td class="num mv up">${x.ups || ''}</td><td class="num mv down">${x.downs || ''}</td><td class="small">${esc(x.last)}</td><td class="num">${x.defiSeances ? `${x.defis} <span class="small muted">(${x.defiSeances})</span>` : ''}</td></tr>`).join('')}
     </tbody></table></div></div>`);
 }
 
@@ -734,7 +806,7 @@ function exportXlsx(sheets, filename) {
 // ---------- Actions ----------
 const A = {
   nav: (el) => go(el.dataset.v),
-  async logout() { stopLive(); localStorage.removeItem('tournoiCode'); localStorage.removeItem('tournoiPool'); await signOut(auth); },
+  async logout() { stopLive(); ['tournoiCode', 'tournoiPool', 'tournoiColl'].forEach((k) => localStorage.removeItem(k)); await signOut(auth); },
   async loginGoogle() {
     const provider = new GoogleAuthProvider();
     try { await signInWithPopup(auth, provider); }
@@ -801,7 +873,10 @@ const A = {
 
   // Nouvelle séance
   async newSession() { await loadHistory(); newWizard(); go('wizard'); },
-  setWiz: (el) => { S.wiz[el.dataset.k] = el.dataset.v; S.wiz.preview = null; render(); },
+  setWiz: (el) => {
+    S.wiz[el.dataset.k] = el.dataset.v; S.wiz.preview = null; render();
+    if (el.dataset.v === 'atp' && !S.atpClasses) loadAtpClasses().then(render).catch(fail);
+  },
   cycleStatus: (el) => {
     const order = ['present', 'absent', 'dispense'];
     const cur = S.wiz.status[el.dataset.sid] || 'present';
@@ -829,12 +904,7 @@ const A = {
     const courts = Math.max(1, +w.courts || 1);
     const matches = {};
     pools.filter((p) => p.entryIds.length).forEach((p) => buildPoolMatches(p, entries, roles, courts).forEach((m) => (matches[m.id] = m)));
-    let code;
-    for (let k = 0; k < 20; k++) {
-      code = String(Math.floor(1000 + Math.random() * 9000));
-      const ex = await getDoc(doc(db, 'sessions', code));
-      if (!ex.exists()) break;
-    }
+    const code = await freeCode();
     const st = S.teacher.settings;
     const session = {
       code, ownerUid: S.user.uid, ownerName: S.user.displayName || '', active: true, createdAt: Date.now(), updatedAt: Date.now(),
@@ -857,6 +927,7 @@ const A = {
   // Séance en direct
   openLive: (el) => { S.poolTab = 'all'; listenSession(el.dataset.code, 'live'); },
   poolTab: (el) => { S.poolTab = el.dataset.v; render(); },
+  resync: () => { if (S.code) { subscribe(); toast('Connexion relancée.'); } },
   async renamePool(el) {
     const pools = S.session.pools.map((p) => ({ ...p }));
     const p = pools.find((x) => x.id === el.dataset.pid);
@@ -917,14 +988,18 @@ const A = {
   async joinCode() {
     const code = document.getElementById('codeIn').value.trim();
     if (!/^\d{4}$/.test(code)) return toast('Le code contient 4 chiffres.', true);
-    const snap = await getDoc(doc(db, 'sessions', code));
-    if (!snap.exists() || !snap.data().active) return toast('Aucune séance en cours avec ce code.', true);
-    localStorage.setItem('tournoiCode', code);
-    listenSession(code, 'tablet-pool', { pool: null });
+    for (const coll of ['sessions', 'defiSessions']) {
+      const snap = await getDoc(doc(db, coll, code));
+      if (snap.exists() && snap.data().active) {
+        localStorage.setItem('tournoiCode', code); localStorage.setItem('tournoiColl', coll);
+        return listenSession(code, coll === 'sessions' ? 'tablet-pool' : 'tablet-defi', { pool: null }, coll);
+      }
+    }
+    toast('Aucune séance en cours avec ce code.', true);
   },
   tabletPool: (el) => { localStorage.setItem('tournoiPool', el.dataset.pid); S.p.pool = el.dataset.pid; render(); },
   tabletChangePool: () => { localStorage.removeItem('tournoiPool'); S.p.pool = null; render(); },
-  tabletLeave: () => { localStorage.removeItem('tournoiCode'); localStorage.removeItem('tournoiPool'); go('tablet-join'); },
+  tabletLeave: () => { ['tournoiCode', 'tournoiPool', 'tournoiColl'].forEach((k) => localStorage.removeItem(k)); go('tablet-join'); },
 
   // Historique
   openHist: (el) => go('histo-detail', { id: el.dataset.id }),
@@ -934,8 +1009,7 @@ const A = {
   },
   async reopenHist(el) {
     const h = S.history.find((x) => x.id === el.dataset.id);
-    let code;
-    for (let k = 0; k < 20; k++) { code = String(Math.floor(1000 + Math.random() * 9000)); if (!(await getDoc(doc(db, 'sessions', code))).exists()) break; }
+    const code = await freeCode();
     const session = { ...h.session, code, active: true, ownerUid: S.user.uid, updatedAt: Date.now(), historyId: h.id, timer: { duration: 600, endAt: null, remaining: 600000 } };
     await setDoc(doc(db, 'sessions', code), session);
     S.active.unshift(session); S.poolTab = 'all';
@@ -958,7 +1032,7 @@ const A = {
   },
   exportSuivi(el) {
     const { c, rows } = studentStats(el.dataset.id);
-    exportXlsx([['Suivi', rows.map((x) => ({ Nom: x.s.nom, Prénom: x.s.prenom, Sexe: x.s.sexe, Niveau: x.s.niveau, Séances: x.seances, Matchs: x.j, Victoires: x.v, Nuls: x.n, Défaites: x.d, 'Bonus fair-play': x.bonus, 'Malus fair-play': x.malus, 'Rôles tenus': Object.entries(x.roles).map(([r, k]) => `${r} x${k}`).join(', '), Montées: x.ups, Descentes: x.downs, 'Dernière poule': x.last }))]], `Suivi_${c.name}.xlsx`);
+    exportXlsx([['Suivi', rows.map((x) => ({ Nom: x.s.nom, Prénom: x.s.prenom, Sexe: x.s.sexe, Niveau: x.s.niveau, Séances: x.seances, Matchs: x.j, Victoires: x.v, Nuls: x.n, Défaites: x.d, 'Bonus fair-play': x.bonus, 'Malus fair-play': x.malus, 'Rôles tenus': Object.entries(x.roles).map(([r, k]) => `${r} x${k}`).join(', '), Montées: x.ups, Descentes: x.downs, 'Dernière poule': x.last, 'Défis solidaires validés': x.defis, 'Séances de défis': x.defiSeances }))]], `Suivi_${c.name}.xlsx`);
   },
 
   // Réglages
@@ -1011,6 +1085,385 @@ const C = {
   async sportTeam(el) { await saveTeacher({ sports: S.teacher.sports.map((x) => (x.id === el.dataset.id ? { ...x, teamSize: Math.max(2, +el.value || 4) } : x)) }); },
 };
 
+// ============================================================
+//  Classement ATP (lecture seule dans la base de l'appli ATP)
+// ============================================================
+const atpUrl = (path) => `${atpConfig.databaseURL.replace(/\/$/, '')}/${path}.json`;
+async function atpFetch(path, shallow = false) {
+  let r;
+  try { r = await fetch(atpUrl(path) + (shallow ? '?shallow=true' : '')); }
+  catch { throw new Error("Base ATP injoignable : vérifie la connexion ou l'adresse dans js/atp-config.js."); }
+  if (r.status === 401 || r.status === 403) throw new Error('La base ATP refuse la lecture : autorise la lecture dans ses règles (voir README).');
+  if (!r.ok) throw new Error(`Base ATP inaccessible (erreur ${r.status}).`);
+  return r.json();
+}
+async function loadAtpClasses() {
+  const data = await atpFetch('tournaments', true);
+  S.atpClasses = Object.keys(data || {}).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }));
+}
+async function saveAtpMap(c) {
+  const w = S.wiz;
+  c.atpClass = w.atp.cls;
+  c.atpMap = { ...(c.atpMap || {}), [w.atp.cls]: Object.fromEntries(w.atp.list.filter((a) => a.sid).map((a) => [a.name, a.sid])) };
+  await saveClass(c);
+}
+function atpPanel(c) {
+  const w = S.wiz;
+  if (!S.atpClasses) return `<div class="panel atp-panel"><p class="muted">Lecture des classes de l'appli ATP…</p><button class="btn small" data-a="atpReloadClasses">Réessayer</button></div>`;
+  if (!S.atpClasses.length) return `<div class="panel atp-panel"><p>Aucune classe trouvée dans l'appli ATP.</p></div>`;
+  const simple = (x) => String(x).toLowerCase().replace(/[\s°e]/g, '');
+  const def = w.atpCls || c.atpClass || S.atpClasses.find((x) => simple(x) === simple(c.name)) || S.atpClasses[0];
+  const head = `<div class="row" style="align-items:flex-end"><label class="f">Classe dans l'appli ATP<select id="atpCls">${S.atpClasses.map((x) => `<option ${x === def ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+    <button class="btn primary" data-a="atpLoad">${w.atp ? 'Recharger le classement' : 'Charger le classement'}</button></div>`;
+  if (!w.atp) return `<div class="panel atp-panel"><h3>Classement ATP</h3>${head}<p class="small muted" style="margin-top:.6rem">Le classement est lu dans ton appli ATP, sans rien y modifier. Le 1er ATP va dans la poule 1, et ainsi de suite.</p></div>`;
+  const used = new Set(w.atp.list.map((a) => a.sid).filter(Boolean));
+  const sorted = [...c.students].sort((a, b) => a.nom.localeCompare(b.nom, 'fr') || a.prenom.localeCompare(b.prenom, 'fr'));
+  const unlinked = c.students.filter((s) => !used.has(s.id));
+  return `<div class="panel atp-panel"><h3>Classement ATP · ${esc(w.atp.cls)}</h3>${head}
+    <p class="small muted" style="margin-top:.6rem">${used.size}/${w.atp.list.length} joueurs ATP reliés à un élève. Vérifie les correspondances : elles sont mémorisées pour les prochaines fois.</p>
+    <div class="table-wrap"><table><thead><tr><th class="num">Rang</th><th>Nom dans l'ATP</th><th class="num">Points</th><th>Élève de la classe</th><th>Statut ATP</th></tr></thead><tbody>
+    ${w.atp.list.map((a, i) => `<tr class="${a.sid ? '' : 'atp-miss'}"><td class="num"><b>${a.rank}</b></td><td>${esc(a.name)}${a.ambiguous ? ' <span class="tag">plusieurs possibles</span>' : ''}</td><td class="num">${a.points}</td>
+      <td><select data-a-change="atpLink" data-i="${i}"><option value="">— non relié —</option>${sorted.map((s) => `<option value="${s.id}" ${s.id === a.sid ? 'selected' : ''}>${esc(fullName(s))}</option>`).join('')}</select></td>
+      <td class="small">${a.dispense ? 'Dispensé' : a.absent ? 'Absent' : ''}</td></tr>`).join('')}
+    </tbody></table></div>
+    ${unlinked.length ? `<p class="small" style="margin-top:.6rem"><b>Sans classement ATP</b> (placés en fin, selon leurs étoiles) : ${unlinked.map((s) => esc(fullName(s))).join(', ')}</p>` : ''}
+    <button class="btn small" data-a="atpStatuses" style="margin-top:.6rem">Reprendre les absents et dispensés de l'ATP</button></div>`;
+}
+
+// ============================================================
+//  Défi solidaire
+// ============================================================
+const byNum = (a, b) => (Number(a.num) || 0) - (Number(b.num) || 0) || String(a.titre).localeCompare(String(b.titre), 'fr');
+function timeOver() {
+  if (!S.session?.timer) return false;
+  const { t, left } = timerState();
+  return t.endAt ? left <= 0 : t.remaining <= 0;
+}
+function newDefiWizard() {
+  S.dw = { classId: S.classes[0]?.id, duration: 15, objectif: 0, ecartMax: 3, absent: {}, defiIds: S.teacher.defis.map((d) => d.id) };
+}
+const defiFiche = (d) => `<div class="fiche">${courtSvg(d.schema)}
+  <p><b>But :</b> ${esc(d.but)}</p>${d.consignes ? `<p><b>Consignes :</b> ${esc(d.consignes)}</p>` : ''}
+  ${d.criteres ? `<p><b>Critères de réalisation :</b> ${esc(d.criteres)}</p>` : ''}${d.materiel ? `<p><b>Matériel :</b> ${esc(d.materiel)}</p>` : ''}</div>`;
+
+function vDefis() {
+  if (!S.defiHistory) { loadDefiHistory().then(render).catch(fail); return shell('<div class="loading">Chargement…</div>'); }
+  if (S.classes.length && (!S.dw || !getClass(S.dw.classId))) newDefiWizard();
+  const defis = [...S.teacher.defis].sort(byNum);
+  let html = `<div class="section-title"><h1>Défi solidaire</h1></div>
+    <p class="muted">Chaque élève valide un maximum de défis dans le temps donné, mais l'écart entre le plus avancé et le plus fragile ne peut pas dépasser la limite : les plus avancés deviennent alors tuteurs. La classe gagne ensemble.</p>`;
+  if (S.activeDefi.length) html += `<h2>En cours</h2>${S.activeDefi.map((s) => `<div class="panel row between"><div><h3>${esc(s.className)}</h3>
+      <div class="muted small">Lancé le ${fmtDate(s.createdAt)} · code ${s.code}</div></div><button class="btn primary" data-a="openDefiLive" data-code="${s.code}">Reprendre</button></div>`).join('')}`;
+  if (!S.classes.length) html += `<div class="panel"><p>Importe d'abord une classe dans l'onglet <b>Classes</b>.</p></div>`;
+  else {
+    const dw = S.dw, c = getClass(dw.classId);
+    const present = c.students.filter((s) => !dw.absent[s.id]);
+    const nDef = dw.defiIds.length;
+    const sugg = Math.round(present.length * Math.min(4, nDef));
+    html += `<div class="panel"><h2>Nouveau défi solidaire</h2><div class="row" style="align-items:flex-end">
+      <label class="f">Classe<select data-a-change="dwClass">${S.classes.map((x) => `<option value="${x.id}" ${x.id === dw.classId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+      <label class="f">Durée (minutes)<input type="number" min="1" max="120" value="${dw.duration}" data-a-change="dwSet" data-k="duration"></label>
+      <label class="f">Objectif de la classe (défis au total)<input type="number" min="1" value="${dw.objectif || sugg}" data-a-change="dwSet" data-k="objectif"></label>
+      <label class="f">Écart maximum autorisé<input type="number" min="1" max="10" value="${dw.ecartMax}" data-a-change="dwSet" data-k="ecartMax"></label></div>
+      <p class="small muted" style="margin-top:.5rem">Suggestion d'objectif : ${sugg} (environ ${Math.min(4, nDef)} défis par élève présent). Avec un écart de ${dw.ecartMax}, un élève qui a ${dw.ecartMax} défis de plus que le plus fragile est bloqué et devient tuteur.</p>
+      <h3 style="margin-top:1rem">Présents <span class="muted small">(${present.length}/${c.students.length}, touche un nom pour le marquer absent)</span></h3>
+      <div class="chips">${[...c.students].sort((a, b) => a.prenom.localeCompare(b.prenom, 'fr')).map((s) => `<button class="chip ${dw.absent[s.id] ? 'off' : 'on'}" data-a="dwAbsent" data-sid="${s.id}">${esc(shortName(s))}</button>`).join('')}</div>
+      <h3 style="margin-top:1rem">Défis proposés <span class="muted small">(${nDef}/${defis.length})</span></h3>
+      <div class="chips">${defis.map((d) => `<button class="chip ${dw.defiIds.includes(d.id) ? 'on' : 'off'}" data-a="dwDefi" data-id="${d.id}">${d.num ? d.num + ' · ' : ''}${esc(d.titre)}</button>`).join('')}</div>
+      <div class="row" style="margin-top:1.2rem"><button class="btn go big" data-a="launchDefi" ${present.length < 2 || !nDef ? 'disabled' : ''}>Lancer le défi</button></div></div>`;
+  }
+  html += `<div class="section-title"><h2>Fiches des défis</h2><div class="row"><button class="btn" data-a="defiEdit">Ajouter un défi</button><button class="btn ghost small" data-a="defiReset">Remettre les fiches d'origine</button></div></div>
+    <div class="defi-grid">${defis.map((d) => `<div class="defi-card"><div class="row between"><span class="defi-num">Défi ${esc(d.num ?? '')}</span>
+      <span><button class="icon-btn" data-a="defiEdit" data-id="${d.id}" title="Modifier">✎</button><button class="icon-btn" data-a="defiDel" data-id="${d.id}" title="Supprimer">✕</button></span></div>
+      <h3>${esc(d.titre)}</h3>${defiFiche(d)}</div>`).join('')}</div>`;
+  const hist = S.defiHistory;
+  html += `<div class="section-title"><h2>Défis terminés</h2></div>${hist.length ? `<div class="panel"><div class="table-wrap"><table><thead><tr><th>Date</th><th>Classe</th><th class="num">Défis</th><th class="num">Écart final</th><th>Résultat</th><th></th></tr></thead><tbody>
+    ${hist.map((h) => `<tr><td>${fmtDate(h.date)}</td><td>${esc(h.className)}</td><td class="num">${h.total}/${h.objectif}</td><td class="num">${h.ecart}</td>
+      <td>${h.success ? '<span class="fp-pos">Réussi</span>' : '<span class="fp-neg">Non atteint</span>'}</td><td style="text-align:right"><button class="btn small" data-a="openDefiHisto" data-id="${h.id}">Voir</button></td></tr>`).join('')}
+    </tbody></table></div></div>` : '<div class="empty">Aucun défi solidaire terminé.</div>'}`;
+  return shell(html);
+}
+
+// Tableau de bord commun (PC et haut des tablettes)
+function defiGauges(s, st) {
+  const pct = Math.min(100, (100 * st.total) / Math.max(1, s.settings.objectif));
+  const ecartPct = Math.min(100, (100 * st.ecart) / st.E);
+  return `<div class="gauges">
+    <div class="gauge-box"><div class="gauge-label">Défis de la classe</div><div class="gauge-num">${st.total}<small> / ${s.settings.objectif}</small></div>
+      <div class="bar"><i style="width:${pct}%"></i></div></div>
+    <div class="gauge-box ${st.ecart >= st.E ? 'warn' : ''}"><div class="gauge-label">Écart entre le plus avancé et le plus fragile</div><div class="gauge-num">${st.ecart}<small> / ${st.E} max</small></div>
+      <div class="bar ecart"><i style="width:${ecartPct}%"></i></div></div>
+  </div>`;
+}
+function vDefiLive() {
+  const s = S.session;
+  if (!s) return shell('<div class="loading">Connexion au défi…</div>');
+  const nm = (p) => shortName(s.people[p]);
+  const st = defiState(s, nm);
+  const over = timeOver();
+  const success = st.total >= s.settings.objectif && st.ecart <= st.E;
+  const counts = Object.fromEntries(s.defis.map((d) => [d.id, 0]));
+  Object.values(st.done).forEach((set) => set.forEach((id) => (counts[id] = (counts[id] || 0) + 1)));
+  const students = [...s.present].sort((a, b) => nm(a).localeCompare(nm(b), 'fr'));
+  return shell(`<div class="live-bar">
+      <div><h1 style="margin:0">Défi solidaire · ${esc(s.className)}</h1><div class="muted">${s.present.length} élèves · ${s.defis.length} défis</div></div>
+      <div class="code-box"><span class="small">Code tablette</span><b>${s.code}</b></div>${syncBadge()}${timerHtml(true)}
+      <div class="row"><button class="btn go" data-a="endDefi">Terminer et archiver</button><button class="btn danger small" data-a="abortDefi">Supprimer</button></div></div>
+    ${over ? `<div class="banner ${success ? 'ok' : 'ko'}">${success ? 'Défi réussi ! La classe a atteint son objectif ensemble.' : `Temps écoulé : ${st.total} défis sur ${s.settings.objectif}.`}</div>` : ''}
+    ${defiGauges(s, st)}
+    ${st.blocked.size ? `<div class="panel tutors"><h3>Tuteurs en mission</h3><div class="chips">${[...st.blocked].map((p) => `<span class="chip on">${esc(nm(p))} aide <b>${esc(nm(st.tutors[p]))}</b></span>`).join('')}</div></div>` : ''}
+    <div class="stu-grid">${students.map((p) => {
+      const cls = st.blocked.has(p) ? 'tuteur' : st.n[p] === st.min && st.max > st.min ? 'fragile' : '';
+      return `<button class="stu ${cls}" data-a="defiStudent" data-pid="${p}"><span class="stu-name">${esc(nm(p))}</span><span class="stu-n">${st.n[p]}</span>
+        <span class="dots">${s.defis.map((d) => `<i class="${st.done[p].has(d.id) ? 'on' : ''}" title="${esc(d.titre)}"></i>`).join('')}</span>
+        <span class="stu-tag">${cls === 'tuteur' ? `Tuteur → ${esc(nm(st.tutors[p]))}` : cls === 'fragile' ? `À aider${st.helpers[p] ? ' · ' + st.helpers[p].map(nm).map(esc).join(', ') : ''}` : '&nbsp;'}</span></button>`;
+    }).join('')}</div>
+    <h2 style="margin-top:1.6rem">Réussites par défi</h2>
+    <div class="panel"><div class="table-wrap"><table><tbody>${s.defis.map((d) => `<tr><td class="num" style="width:3rem"><b>${esc(d.num ?? '')}</b></td><td>${esc(d.titre)}</td>
+      <td style="width:45%"><div class="bar"><i style="width:${(100 * counts[d.id]) / Math.max(1, s.present.length)}%"></i></div></td><td class="num">${counts[d.id]}</td></tr>`).join('')}</tbody></table></div></div>`);
+}
+
+function vTabletDefi() {
+  const s = S.session;
+  if (!s) return '<div class="loading">Connexion au défi…</div>';
+  const nm = (p) => shortName(s.people[p]);
+  const st = defiState(s, nm);
+  const over = timeOver();
+  const pid = S.p.pid && s.present.includes(S.p.pid) ? S.p.pid : null;
+  const header = `<header class="topbar"><div class="brand">Défi solidaire<small>${esc(s.className)}</small></div><div class="nav"></div>
+    ${syncBadge()}${timerHtml(false)}${pid ? '<button class="btn small ghost" style="color:inherit" data-a="tdBack">Changer d\'élève</button>' : ''}</header>`;
+  let body = defiGauges(s, st);
+  if (over) body += `<div class="banner ko">Temps écoulé : plus de validation possible.</div>`;
+  if (!pid) {
+    body += `<h1>Qui es-tu ?</h1><div class="name-grid">${[...s.present].sort((a, b) => nm(a).localeCompare(nm(b), 'fr')).map((p) =>
+      `<button class="name-btn ${st.blocked.has(p) ? 'tuteur' : ''}" data-a="tdPick" data-pid="${p}">${esc(nm(p))}<span>${st.n[p]} défi${st.n[p] > 1 ? 's' : ''}${st.blocked.has(p) ? ' · tuteur' : ''}</span></button>`).join('')}</div>
+      <p style="margin-top:2rem"><button class="btn ghost small" data-a="tabletLeave">Quitter ce défi</button></p>`;
+  } else {
+    const blocked = st.blocked.has(pid);
+    body += `<h1>${esc(nm(pid))} · ${st.n[pid]} défi${st.n[pid] > 1 ? 's' : ''} validé${st.n[pid] > 1 ? 's' : ''}</h1>`;
+    if (blocked) body += `<div class="banner tuteur">Bravo, tu as ${st.n[pid] - st.min} défis d'avance ! Tu deviens tuteur : aide <b>${esc(nm(st.tutors[pid]))}</b> à réussir un défi. Tu pourras continuer dès que les plus fragiles auront progressé.</div>`;
+    else if (st.helpers[pid]) body += `<div class="banner aide">${st.helpers[pid].map(nm).map(esc).join(' et ')} ${st.helpers[pid].length > 1 ? 'viennent' : 'vient'} t'aider. Choisissez un défi ensemble !</div>`;
+    body += `<div class="defi-grid">${s.defis.map((d) => {
+      const done = st.done[pid].has(d.id);
+      return `<button class="defi-card pick ${done ? 'done' : ''}" data-a="tdDefi" data-id="${d.id}"><span class="defi-num">Défi ${esc(d.num ?? '')}${done ? ' · ✓ validé' : ''}</span>
+        <h3>${esc(d.titre)}</h3>${courtSvg(d.schema)}<p class="small">${esc(d.but)}</p></button>`;
+    }).join('')}</div>`;
+  }
+  return `${header}<main class="main">${body}</main>${footer()}`;
+}
+
+// Fiche d'un défi sur tablette : lire, valider avec un témoin, ou annuler
+function renderTabletDefiModal() {
+  const s = S.session, m = S.modal;
+  const d = s.defis.find((x) => x.id === m.defiId);
+  const nm = (p) => shortName(s.people[p]);
+  const st = defiState(s, nm);
+  const done = st.done[m.pid]?.has(d.id);
+  let actions;
+  if (m.step === 'witness') {
+    return openModal(`<h2>Qui a vu ${esc(nm(m.pid))} réussir ?</h2><p class="muted">Le témoin touche son prénom pour confirmer le défi « ${esc(d.titre)} ».</p>
+      <div class="name-grid">${s.present.filter((p) => p !== m.pid).sort((a, b) => nm(a).localeCompare(nm(b), 'fr')).map((p) => `<button class="name-btn" data-a="tdWitness" data-pid="${p}">${esc(nm(p))}</button>`).join('')}</div>
+      <div class="modal-actions"><button class="btn" data-a="tdStep" data-v="fiche">Retour</button></div>`);
+  }
+  if (done) actions = `<button class="btn danger" data-a="tdCancel">Annuler ma validation</button>`;
+  else if (timeOver()) actions = `<span class="muted">Temps écoulé.</span>`;
+  else if (st.blocked.has(m.pid)) actions = `<span class="muted">Tu es tuteur : aide d'abord ${esc(nm(st.tutors[m.pid]))}.</span>`;
+  else actions = `<button class="btn go big" data-a="tdStep" data-v="witness">J'ai réussi ce défi</button>`;
+  openModal(`<h2>Défi ${esc(d.num ?? '')} · ${esc(d.titre)}</h2>${defiFiche(d)}
+    <div class="modal-actions"><button class="btn" data-a="closeModal">Fermer</button>${actions}</div>`);
+}
+
+// Fiche élève côté professeur : valider ou annuler n'importe quel défi
+function renderTeacherDefiModal() {
+  const s = S.session, pid = S.modal.pid;
+  const nm = (p) => p === 'prof' ? 'le professeur' : shortName(s.people[p]);
+  const vals = Object.values(s.validations || {}).filter((v) => v.pid === pid);
+  openModal(`<h2>${esc(nm(pid))}</h2><p class="muted small">Le professeur peut valider ou annuler un défi à tout moment, même si l'élève est tuteur.</p>
+    <div class="stack">${s.defis.map((d) => {
+      const v = vals.find((x) => x.defiId === d.id);
+      return `<div class="row between"><span><b>${esc(d.num ?? '')}</b> ${esc(d.titre)}${v ? ` <span class="small muted">· témoin : ${esc(nm(v.witness))}</span>` : ''}</span>
+        ${v ? `<button class="btn small danger" data-a="tdTeacherToggle" data-id="${d.id}">Annuler</button>` : `<button class="btn small go" data-a="tdTeacherToggle" data-id="${d.id}">Valider</button>`}</div>`;
+    }).join('')}</div><div class="modal-actions"><span></span><button class="btn primary" data-a="closeModal">Fermer</button></div>`, 'narrow');
+}
+async function addValidation(pid, defiId, witness) {
+  await updateDoc(sesRef(), { [`validations.${uid()}`]: { pid, defiId, witness, at: Date.now() }, updatedAt: Date.now() });
+}
+async function removeValidation(pid, defiId) {
+  const upd = { updatedAt: Date.now() };
+  Object.entries(S.session.validations || {}).filter(([, v]) => v.pid === pid && v.defiId === defiId).forEach(([k]) => (upd[`validations.${k}`] = deleteField()));
+  await updateDoc(sesRef(), upd);
+}
+
+function vDefiHisto() {
+  const h = (S.defiHistory || []).find((x) => x.id === S.p.id);
+  if (!h) return shell('<div class="empty">Défi introuvable.</div>');
+  const s = h.session;
+  const nm = (p) => p === 'prof' ? 'professeur' : shortName(s.people[p]);
+  const st = defiState(s, nm);
+  return shell(`<div class="section-title"><div class="row"><button class="btn ghost" data-a="nav" data-v="defis">‹ Défi solidaire</button>
+    <h1 style="margin:0">${esc(h.className)}</h1></div><span class="muted">${fmtDate(h.date)}</span></div>
+    <div class="row" style="margin-bottom:1rem"><button class="btn" data-a="exportDefi" data-id="${h.id}">Exporter en Excel</button><button class="btn danger" data-a="deleteDefiHisto" data-id="${h.id}">Supprimer</button></div>
+    <div class="banner ${h.success ? 'ok' : 'ko'}">${h.success ? 'Défi réussi' : 'Objectif non atteint'} : ${h.total} défis sur ${h.objectif}, écart final de ${h.ecart} (maximum ${st.E}), en ${s.settings.duration} minutes.</div>
+    <div class="panel"><div class="table-wrap"><table><thead><tr><th>Élève</th><th class="num">Défis</th><th>Défis validés</th></tr></thead><tbody>
+    ${[...s.present].sort((a, b) => st.n[b] - st.n[a] || nm(a).localeCompare(nm(b), 'fr')).map((p) => `<tr><td>${esc(fullName(s.people[p]))}</td><td class="num"><b>${st.n[p]}</b></td>
+      <td class="small">${s.defis.filter((d) => st.done[p].has(d.id)).map((d) => esc(d.num ?? d.titre)).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>`);
+}
+
+Object.assign(A, {
+  // ATP
+  async atpReloadClasses() { await loadAtpClasses(); render(); },
+  async atpLoad() {
+    const w = S.wiz, c = getClass(w.classId), cls = document.getElementById('atpCls').value;
+    const raw = await atpFetch(`tournaments/${encodeURIComponent(cls)}/students`);
+    const list = matchAtp(parseAtpStudents(raw), c.students, c.atpMap?.[cls] || {});
+    if (!list.length) return toast('Aucun élève dans cette classe ATP.', true);
+    w.atp = { cls, list }; w.atpCls = cls; w.preview = null;
+    await saveAtpMap(c);
+    toast(`Classement ATP chargé : ${list.length} joueurs.`); render();
+  },
+  atpStatuses() {
+    const w = S.wiz; let k = 0;
+    w.atp.list.forEach((a) => { if (a.sid) { w.status[a.sid] = a.dispense ? 'dispense' : a.absent ? 'absent' : 'present'; k++; } });
+    w.preview = null; toast(`Statuts repris de l'ATP pour ${k} élèves : vérifie-les.`); render();
+  },
+  // Défi : préparation
+  dwAbsent: (el) => { S.dw.absent[el.dataset.sid] = !S.dw.absent[el.dataset.sid]; render(); },
+  dwDefi: (el) => { const ids = S.dw.defiIds, id = el.dataset.id; S.dw.defiIds = ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]; render(); },
+  async launchDefi() {
+    const dw = S.dw, c = getClass(dw.classId);
+    const present = c.students.filter((s) => !dw.absent[s.id]).map((s) => s.id);
+    const defis = S.teacher.defis.filter((d) => dw.defiIds.includes(d.id)).sort(byNum);
+    const objectif = dw.objectif || Math.round(present.length * Math.min(4, defis.length));
+    const code = await freeCode();
+    const session = {
+      code, type: 'defi', ownerUid: S.user.uid, ownerName: S.user.displayName || '', active: true, createdAt: Date.now(), updatedAt: Date.now(),
+      classId: c.id, className: c.name,
+      people: Object.fromEntries(c.students.map((s) => [s.id, { nom: s.nom, prenom: s.prenom, sexe: s.sexe || '', niveau: s.niveau }])),
+      present, defis, settings: { duration: dw.duration, objectif, ecartMax: dw.ecartMax },
+      timer: { duration: dw.duration * 60, endAt: null, remaining: dw.duration * 60000 }, validations: {},
+    };
+    await setDoc(doc(db, 'defiSessions', code), session);
+    S.activeDefi.unshift(session); newDefiWizard();
+    listenSession(code, 'defi-live', {}, 'defiSessions');
+  },
+  openDefiLive: (el) => listenSession(el.dataset.code, 'defi-live', {}, 'defiSessions'),
+  // Défi : professeur
+  defiStudent: (el) => { S.modal = { type: 'defiT', pid: el.dataset.pid }; renderTeacherDefiModal(); },
+  async tdTeacherToggle(el) {
+    const pid = S.modal.pid, id = el.dataset.id;
+    const has = Object.values(S.session.validations || {}).some((v) => v.pid === pid && v.defiId === id);
+    if (has) await removeValidation(pid, id); else await addValidation(pid, id, 'prof');
+    if (S.modal?.type === 'defiT') renderTeacherDefiModal();
+  },
+  async endDefi() {
+    const s = S.session;
+    if (!(await confirmBox('Terminer le défi et l\'archiver ?', 'Terminer et archiver', false))) return;
+    const st = defiState(s, (p) => shortName(s.people[p]));
+    const { timer, ...data } = s;
+    const rec = {
+      date: s.createdAt, endedAt: Date.now(), classId: s.classId, className: s.className, session: { ...data, active: false },
+      total: st.total, objectif: s.settings.objectif, ecart: st.ecart, success: st.total >= s.settings.objectif && st.ecart <= st.E, counts: st.n,
+    };
+    const id = (await addDoc(defiHistCol(), rec)).id;
+    const code = s.code; stopLive();
+    await deleteDoc(doc(db, 'defiSessions', code));
+    S.activeDefi = S.activeDefi.filter((x) => x.code !== code);
+    await loadDefiHistory(true); toast('Défi archivé.'); go('defi-histo', { id });
+  },
+  async abortDefi() {
+    if (!(await confirmBox('Supprimer ce défi sans l\'archiver ?', 'Supprimer'))) return;
+    const code = S.session.code; stopLive();
+    await deleteDoc(doc(db, 'defiSessions', code)); S.activeDefi = S.activeDefi.filter((x) => x.code !== code); go('defis');
+  },
+  // Défi : tablette
+  tdPick: (el) => { S.p.pid = el.dataset.pid; render(); window.scrollTo(0, 0); },
+  tdBack: () => { S.p.pid = null; render(); },
+  tdDefi: (el) => { S.modal = { type: 'defi', pid: S.p.pid, defiId: el.dataset.id, step: 'fiche' }; renderTabletDefiModal(); },
+  tdStep: (el) => { S.modal.step = el.dataset.v; renderTabletDefiModal(); },
+  async tdWitness(el) {
+    const { pid, defiId } = S.modal;
+    const st = defiState(S.session, (p) => shortName(S.session.people[p]));
+    closeModal();
+    if (st.done[pid].has(defiId)) return toast('Ce défi est déjà validé.');
+    if (timeOver()) return toast('Temps écoulé.', true);
+    if (st.blocked.has(pid)) return toast('Tu es tuteur : aide d\'abord tes camarades.', true);
+    await addValidation(pid, defiId, el.dataset.pid);
+    toast(`Bravo ${shortName(S.session.people[pid])} ! Défi validé.`);
+    S.p.pid = null; render();
+  },
+  async tdCancel() {
+    const { pid, defiId } = S.modal;
+    if (!(await confirmBox('Annuler la validation de ce défi ?', 'Annuler la validation'))) return;
+    await removeValidation(pid, defiId); toast('Validation annulée.'); render();
+  },
+  // Défi : fiches
+  defiEdit(el) {
+    const id = el.dataset.id;
+    const max = Math.max(0, ...S.teacher.defis.map((d) => Number(d.num) || 0));
+    const d = id ? S.teacher.defis.find((x) => x.id === id) : { num: max + 1, titre: '', but: '', consignes: '', criteres: '', materiel: '', schema: 'joueurs' };
+    S.modal = { type: 'defiEdit', id };
+    openModal(`<h2>${id ? 'Modifier le défi' : 'Nouveau défi'}</h2><div class="stack">
+      <div class="row"><label class="f">Numéro<input type="number" id="de_num" value="${esc(d.num ?? '')}"></label><label class="f" style="flex:1">Titre<input id="de_titre" value="${esc(d.titre)}"></label></div>
+      <label class="f">But<textarea id="de_but" rows="2">${esc(d.but)}</textarea></label>
+      <label class="f">Consignes<textarea id="de_consignes" rows="3">${esc(d.consignes)}</textarea></label>
+      <label class="f">Critères de réalisation<textarea id="de_criteres" rows="2">${esc(d.criteres)}</textarea></label>
+      <label class="f">Matériel<input id="de_materiel" value="${esc(d.materiel)}"></label>
+      <label class="f">Schéma<select id="de_schema" data-a-change="dePreview">${Object.entries(SCHEMAS).map(([k, l]) => `<option value="${k}" ${k === d.schema ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <div id="de_prev" class="fiche">${courtSvg(d.schema)}</div></div>
+      <div class="modal-actions"><button class="btn" data-a="closeModal">Annuler</button><button class="btn primary" data-a="defiSaveEdit">Enregistrer</button></div>`);
+  },
+  async defiSaveEdit() {
+    const v = (k) => document.getElementById('de_' + k).value.trim();
+    if (!v('titre')) return toast('Indique un titre.', true);
+    const data = { num: v('num') === '' ? null : Number(v('num')), titre: v('titre'), but: v('but'), consignes: v('consignes'), criteres: v('criteres'), materiel: v('materiel'), schema: v('schema') };
+    const id = S.modal.id;
+    const defis = id ? S.teacher.defis.map((d) => (d.id === id ? { ...d, ...data } : d)) : [...S.teacher.defis, { id: uid(), ...data }];
+    closeModal(); await saveTeacher({ defis });
+    if (!id && S.dw) S.dw.defiIds.push(defis.at(-1).id);
+    toast('Défi enregistré.'); render();
+  },
+  async defiDel(el) {
+    const d = S.teacher.defis.find((x) => x.id === el.dataset.id);
+    if (!(await confirmBox(`Supprimer le défi « ${d.titre} » ?`, 'Supprimer'))) return;
+    await saveTeacher({ defis: S.teacher.defis.filter((x) => x.id !== d.id) });
+    if (S.dw) S.dw.defiIds = S.dw.defiIds.filter((x) => x !== d.id);
+    render();
+  },
+  async defiReset() {
+    if (!(await confirmBox("Remettre les fiches d'origine ? Tes modifications et défis ajoutés seront perdus.", 'Remettre'))) return;
+    const defis = DEFAULT_DEFIS.map((d) => ({ id: uid(), ...d }));
+    await saveTeacher({ defis }); newDefiWizard(); render();
+  },
+  // Défi : historique
+  openDefiHisto: (el) => go('defi-histo', { id: el.dataset.id }),
+  async deleteDefiHisto(el) {
+    if (!(await confirmBox('Supprimer définitivement ce défi de l\'historique ?', 'Supprimer'))) return;
+    await deleteDoc(doc(defiHistCol(), el.dataset.id)); S.defiHistory = S.defiHistory.filter((h) => h.id !== el.dataset.id); go('defis');
+  },
+  exportDefi(el) {
+    const h = S.defiHistory.find((x) => x.id === el.dataset.id), s = h.session;
+    const nm = (p) => p === 'prof' ? 'Professeur' : fullName(s.people[p]);
+    const st = defiState(s, nm);
+    const eleves = s.present.map((p) => ({ Nom: s.people[p].nom, Prénom: s.people[p].prenom, 'Défis validés': st.n[p], Liste: s.defis.filter((d) => st.done[p].has(d.id)).map((d) => `${d.num ?? ''} ${d.titre}`.trim()).join(', ') }));
+    const vals = Object.values(s.validations || {}).sort((a, b) => a.at - b.at).map((v) => {
+      const d = s.defis.find((x) => x.id === v.defiId);
+      return { Heure: new Date(v.at).toLocaleTimeString('fr-FR'), Élève: nm(v.pid), Défi: d ? `${d.num ?? ''} ${d.titre}`.trim() : '?', Témoin: nm(v.witness) };
+    });
+    exportXlsx([['Élèves', eleves], ['Validations', vals]], `Defi_${h.className}_${new Date(h.date).toISOString().slice(0, 10)}.xlsx`);
+  },
+});
+Object.assign(C, {
+  async atpLink(el) {
+    const w = S.wiz, i = +el.dataset.i, sid = el.value;
+    w.atp.list.forEach((a, j) => { if (j !== i && sid && a.sid === sid) a.sid = ''; });
+    w.atp.list[i].sid = sid; w.atp.list[i].ambiguous = false; w.preview = null;
+    await saveAtpMap(getClass(w.classId)); render();
+  },
+  dwClass(el) { S.dw.classId = el.value; S.dw.absent = {}; S.dw.objectif = 0; render(); },
+  dwSet(el) { S.dw[el.dataset.k] = Math.max(el.dataset.k === 'objectif' ? 0 : 1, +el.value || 0); render(); },
+  dePreview(el) { document.getElementById('de_prev').innerHTML = courtSvg(el.value); },
+});
+
 // ---------- Délégation des événements ----------
 function setPath(obj, path, value) {
   const keys = path.split('.'); let o = obj;
@@ -1031,6 +1484,7 @@ document.addEventListener('change', async (e) => {
   if (el.dataset.bind && S.wiz) {
     setPath(S.wiz, el.dataset.bind, el.type === 'number' ? +el.value : el.value);
     if (!el.dataset.bind.startsWith('preview') && !['roles', 'courts'].includes(el.dataset.bind)) S.wiz.preview = null;
+    if (el.dataset.bind === 'classId') S.wiz.atp = null;
     if ('rerender' in el.dataset) render();
   }
 });
@@ -1049,9 +1503,12 @@ else onAuthStateChanged(auth, async (user) => {
     if (!user) { stopLive(); go('login'); return; }
     if (user.isAnonymous) {
       const code = localStorage.getItem('tournoiCode');
+      const coll = localStorage.getItem('tournoiColl') || 'sessions';
       if (code) {
-        const snap = await getDoc(doc(db, 'sessions', code));
-        if (snap.exists() && snap.data().active) { listenSession(code, 'tablet-pool', { pool: localStorage.getItem('tournoiPool') }); return; }
+        const snap = await getDoc(doc(db, coll, code));
+        if (snap.exists() && snap.data().active) {
+          listenSession(code, coll === 'sessions' ? 'tablet-pool' : 'tablet-defi', { pool: localStorage.getItem('tournoiPool') }, coll); return;
+        }
         localStorage.removeItem('tournoiCode');
       }
       go('tablet-join'); return;
